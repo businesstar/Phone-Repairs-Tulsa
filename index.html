@@ -1,463 +1,453 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Phone Repairs Tulsa | Tulsa, OK</title>
-    <!-- Load Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Load Lucide Icons for aesthetic components -->
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <!-- Load Firebase SDKs -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // Set Firebase Log Level to Debug for development/error checking
-        setLogLevel('debug');
-
-        // --- GLOBAL FIREBASE & APP VARIABLES ---
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-
-        let app, db, auth;
-        let currentUserId = 'unknown';
-
-        // --- UTILITY FUNCTIONS ---
-
-        // Function to handle exponential backoff for API calls
-        async function fetchWithBackoff(url, options, maxRetries = 5) {
-            for (let i = 0; i < maxRetries; i++) {
-                try {
-                    const response = await fetch(url, options);
-                    if (response.status === 429 && i < maxRetries - 1) {
-                        const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
-                        console.warn(`Rate limit hit, retrying in ${Math.round(delay / 1000)}s...`);
-                        await new Promise(resolve => setTimeout(resolve, delay));
-                        continue;
-                    }
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    return response;
-                } catch (error) {
-                    if (i === maxRetries - 1) {
-                        throw error;
-                    }
-                }
-            }
-        }
-
-        // --- FIREBASE INITIALIZATION & AUTHENTICATION ---
-        async function initializeFirebase() {
-            try {
-                if (!firebaseConfig || Object.keys(firebaseConfig).length === 0) {
-                    console.error("Firebase config is missing or empty. Cannot initialize Firestore.");
-                    return;
-                }
-                
-                app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                
-                // Sign in using the provided custom token or anonymously
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
-
-                currentUserId = auth.currentUser?.uid || 'anonymous';
-                document.getElementById('user-id-display').textContent = `User ID: ${currentUserId}`;
-
-                startChatListener();
-
-            } catch (error) {
-                console.error("Error during Firebase initialization or authentication:", error);
-                document.getElementById('chat-messages').innerHTML = `<p class="text-red-500 p-4 text-sm">Error initializing chat: ${error.message}. Check console for details.</p>`;
-            }
-        }
-
-        // --- CHAT FUNCTIONS (Feature 1: Conversational Assistant) ---
-
-        // Gemini API configuration
-        const API_MODEL = 'gemini-2.5-flash-preview-09-2025';
-        const API_KEY = "";
-        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${API_MODEL}:generateContent?key=${API_KEY}`;
-        // Updated identity to Phone Repairs Tulsa
-        const SYSTEM_INSTRUCTION = "You are a friendly and knowledgeable customer service agent for 'Phone Repairs Tulsa' in Tulsa, OK. Your primary focus is quick, affordable repairs for devices like iPhones and Samsung Galaxy phones. Always state that all common iPhone repairs (screen, battery) cost between $60 and $100. Always keep answers concise and professional. Do not accept appointments; tell the user to visit our shop or call us at (918) 376-0093. Mention our location is Tulsa, OK.";
-
-        async function getGeminiResponse(message) {
-            const payload = {
-                contents: [{ parts: [{ text: message }] }],
-                tools: [{ "google_search": {} }], 
-                systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-            };
-
-            const options = {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            };
-
-            try {
-                const response = await fetchWithBackoff(API_URL, options);
-                const result = await response.json();
-                const candidate = result.candidates?.[0];
-
-                if (candidate && candidate.content?.parts?.[0]?.text) {
-                    return candidate.content.parts[0].text;
-                } else {
-                    console.error("Gemini response lacked text content:", result);
-                    return "Sorry, I'm having trouble connecting right now. Please try again or call us at (918) 376-0093!";
-                }
-            } catch (error) {
-                console.error("Gemini API call failed:", error);
-                return "Our digital assistant is currently unavailable. Please call our store at (918) 376-0093.";
-            }
-        }
-
-        const CHAT_COLLECTION_PATH = `artifacts/${appId}/public/data/chat_messages`;
-
-        async function sendMessage(text) {
-            if (!db) {
-                console.error("Firestore not initialized.");
-                return;
-            }
-
-            const chatMessagesDiv = document.getElementById('chat-messages');
-            const chatInput = document.getElementById('chat-input');
-            const sendButton = document.getElementById('send-button');
-
-            chatInput.disabled = true;
-            sendButton.disabled = true;
-            sendButton.innerHTML = `<svg class="animate-spin h-5 w-5 mr-3 text-white" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Sending...`;
-
-            try {
-                await addDoc(collection(db, CHAT_COLLECTION_PATH), {
-                    userId: currentUserId,
-                    text: text,
-                    timestamp: serverTimestamp(),
-                    role: 'user',
-                    appId: appId
-                });
-
-                const geminiText = await getGeminiResponse(text);
-
-                await addDoc(collection(db, CHAT_COLLECTION_PATH), {
-                    userId: 'TulsaPhoneRepairs-Bot',
-                    text: geminiText,
-                    timestamp: serverTimestamp(),
-                    role: 'bot',
-                    appId: appId
-                });
-
-                chatInput.value = ''; 
-
-            } catch (e) {
-                console.error("Error sending message: ", e);
-                chatMessagesDiv.innerHTML += `<div class="p-2 text-sm text-red-500 text-center">Failed to send message.</div>`;
-            } finally {
-                chatInput.disabled = false;
-                sendButton.disabled = false;
-                sendButton.innerHTML = `Send`;
-                chatInput.focus();
-            }
-        }
-
-        function startChatListener() {
-            if (!db) return;
-
-            const chatMessagesDiv = document.getElementById('chat-messages');
-            const q = query(collection(db, CHAT_COLLECTION_PATH), orderBy('timestamp', 'asc'));
-
-            onSnapshot(q, (snapshot) => {
-                let messagesHtml = '';
-                snapshot.docs.forEach(doc => {
-                    const data = doc.data();
-                    const isBot = data.role === 'bot';
-                    const isCurrentUser = data.userId === currentUserId && data.role === 'user';
-                    
-                    const time = data.timestamp ? new Date(data.timestamp.toDate()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '...';
-                    
-                    let senderName = isBot ? 'PRT Bot' : (isCurrentUser ? 'You' : 'User');
-
-                    const messageClass = isBot
-                        ? 'bg-blue-100 text-gray-800 self-start rounded-b-xl rounded-tr-xl'
-                        : (isCurrentUser
-                            ? 'bg-red-500 text-white self-end rounded-b-xl rounded-tl-xl'
-                            : 'bg-gray-200 text-gray-800 self-start rounded-b-xl rounded-tr-xl');
-                    
-                    const nameColor = isBot ? 'text-blue-600' : 'text-xs text-gray-400';
-
-                    messagesHtml += `
-                        <div class="flex flex-col mb-4 ${isCurrentUser ? 'items-end' : 'items-start'}">
-                            <div class="px-3 py-1 ${nameColor} font-semibold">${senderName}</div>
-                            <div class="${messageClass} p-3 max-w-xs md:max-w-md shadow-md break-words">
-                                ${data.text.replace(/\n/g, '<br>')}
-                                <span class="block mt-1 text-xs opacity-70 ${isCurrentUser ? 'text-white' : 'text-gray-500'}">${time}</span>
-                            </div>
-                        </div>
-                    `;
-                });
-                chatMessagesDiv.innerHTML = messagesHtml;
-                chatMessagesDiv.scrollTop = chatMessagesDiv.scrollHeight;
-            }, (error) => {
-                console.error("Error listening to chat messages:", error);
-            });
-        }
-        
-        // --- QUOTE FUNCTIONS (Feature 2: Structured Quote Estimator) ---
-        const QUOTE_SYSTEM_INSTRUCTION = "You are an AI estimator for 'Phone Repairs Tulsa' in Tulsa, OK. Based on the user's phone model and damage type, provide a specific repair estimate. ALL screen and battery repairs for iPhones MUST be quoted between $60 and $100. Repair time should be a realistic range (e.g., 45-90 minutes).";
-
-        function displayAlert(message) {
-            const alertBox = document.getElementById('custom-alert');
-            alertBox.textContent = message;
-            alertBox.classList.remove('hidden');
-            setTimeout(() => { alertBox.classList.add('hidden'); }, 3000);
-        }
-
-        async function getRepairQuote(model, damage) {
-            const quoteResultDiv = document.getElementById('quote-result');
-            const quoteButton = document.getElementById('quote-button');
-            
-            if (!model || !damage) {
-                displayAlert("Please enter both the phone model and damage type to get a quote.");
-                return;
-            }
-
-            quoteButton.disabled = true;
-            quoteButton.innerHTML = `<svg class="animate-spin h-5 w-5 mr-2" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Generating Quote...`;
-            quoteResultDiv.innerHTML = `<p class="text-center text-sm text-gray-500 p-4">Calculating the best estimate...</p>`;
-
-            const userQuery = `Provide a repair quote for a ${model} with ${damage}.`;
-            const payload = {
-                contents: [{ parts: [{ text: userQuery }] }],
-                systemInstruction: { parts: [{ text: QUOTE_SYSTEM_INSTRUCTION }] },
-                generationConfig: {
-                    responseMimeType: "application/json",
-                    responseSchema: {
-                        type: "OBJECT",
-                        properties: {
-                            estimatedPrice: { type: "STRING" },
-                            estimatedTime: { type: "STRING" },
-                            disclaimer: { type: "STRING" }
-                        },
-                        required: ["estimatedPrice", "estimatedTime", "disclaimer"]
-                    }
-                }
-            };
-
-            try {
-                const response = await fetchWithBackoff(API_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                const result = await response.json();
-                const quote = JSON.parse(result.candidates[0].content.parts[0].text);
-
-                quoteResultDiv.innerHTML = `
-                    <h5 class="text-xl font-bold text-gray-800 mb-3 flex items-center justify-center"><i data-lucide="calculator" class="w-6 h-6 mr-2 text-red-500"></i> Your Instant Quote</h5>
-                    <div class="space-y-3">
-                        <p class="text-2xl font-extrabold text-tulsa-red border-b pb-2">Price Estimate: ${quote.estimatedPrice}</p>
-                        <p class="text-lg font-medium text-gray-700">Repair Time: <span class="text-green-600 font-semibold">${quote.estimatedTime}</span></p>
-                        <p class="text-sm text-gray-500 italic pt-2 border-t mt-3">${quote.disclaimer}</p>
-                    </div>
-                `;
-                lucide.createIcons();
-            } catch (error) {
-                quoteResultDiv.innerHTML = `<p class="text-center text-red-500 text-sm p-4">Error generating quote. Call (918) 376-0093.</p>`;
-            } finally {
-                quoteButton.disabled = false;
-                quoteButton.innerHTML = `✨ Generate Quote`;
-            }
-        }
-
-        document.addEventListener('DOMContentLoaded', () => {
-            initializeFirebase();
-            const chatForm = document.getElementById('chat-form');
-            chatForm.addEventListener('submit', (e) => {
-                e.preventDefault();
-                const text = document.getElementById('chat-input').value.trim();
-                if (text) sendMessage(text);
-            });
-            document.getElementById('quote-button').addEventListener('click', () => {
-                getRepairQuote(document.getElementById('phone-model-input').value, document.getElementById('damage-type-input').value);
-            });
-        });
-    </script>
-    <style>
-        body { font-family: 'Inter', sans-serif; background-color: #f7f9fc; }
-        .section-padding { padding: 4rem 1rem; }
-        .text-tulsa-red { color: #D61A3C; }
-        .bg-tulsa-gray { background-color: #3C4043; }
-        .btn-primary {
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 6px -1px rgba(220, 38, 38, 0.5);
-        }
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 15px -3px rgba(220, 38, 38, 0.5);
-        }
-        #custom-alert { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 1000; }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Phone Repairs Tulsa | Fast iPhone & Android Repair</title>
+  <meta name="description" content="Phone Repairs Tulsa offers fast, affordable iPhone & Android repairs: screen, battery, charging port, water damage & more. Same-day service available."/>
+  <meta name="keywords" content="Phone Repairs Tulsa, iPhone repair Tulsa, Android repair Tulsa, screen repair Tulsa, battery replacement Tulsa, charging port repair Tulsa"/>
+  <link rel="stylesheet" href="styles.css"/>
 </head>
-<body class="text-gray-800">
 
-    <div id="custom-alert" class="hidden bg-yellow-400 text-yellow-900 p-3 rounded-lg shadow-xl text-sm font-semibold transition duration-300"></div>
+<body>
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="container topbar-inner">
+      <div class="topbar-left">
+        <span class="badge">Same-Day Repairs</span>
+        <span class="muted">Tulsa, OK</span>
+      </div>
+      <div class="topbar-right">
+        <a class="topbar-link" href="tel:+19185550123">Call: (918) 555-0123</a>
+        <a class="topbar-link" href="#hours">Hours</a>
+      </div>
+    </div>
+  </div>
 
-    <!-- Header -->
-    <header class="bg-white shadow-lg sticky top-0 z-10">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
-            <a href="#" class="flex items-center space-x-2">
-                <i data-lucide="wrench" class="w-8 h-8 text-tulsa-red"></i>
-                <h1 class="text-2xl font-extrabold tracking-tight text-tulsa-gray">Phone Repairs Tulsa</h1>
-            </a>
-            <p class="hidden sm:block text-sm font-medium text-gray-500">Tulsa, OK's Local Experts | (918) 376-0093</p>
+  <!-- Header / Nav -->
+  <header class="header" id="top">
+    <div class="container header-inner">
+      <a class="logo" href="#top" aria-label="Phone Repairs Tulsa Home">
+        <span class="logo-mark">PR</span>
+        <span class="logo-text">
+          <strong>Phone Repairs</strong>
+          <span class="logo-sub">Tulsa</span>
+        </span>
+      </a>
+
+      <nav class="nav" aria-label="Primary">
+        <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="navMenu">
+          <span class="sr-only">Open menu</span>
+          ☰
+        </button>
+        <div class="nav-menu" id="navMenu">
+          <a href="#services">Services</a>
+          <a href="#pricing">Pricing</a>
+          <a href="#reviews">Reviews</a>
+          <a href="#faq">FAQ</a>
+          <a href="#contact" class="btn btn-small">Book Now</a>
         </div>
-    </header>
+      </nav>
+    </div>
+  </header>
 
-    <!-- Hero -->
-    <section class="bg-tulsa-gray text-white section-padding">
-        <div class="max-w-7xl mx-auto text-center">
-            <div class="space-y-4">
-                <h2 class="text-5xl md:text-6xl font-extrabold tracking-tight leading-tight uppercase">
-                    Tulsa's Trusted Phone Repair
-                </h2>
-                <p class="text-xl md:text-2xl font-light text-gray-300 max-w-3xl mx-auto">
-                    Professional, same-day repairs in Tulsa, Oklahoma. Quality service you can count on.
-                </p>
-                <a href="#services" class="inline-flex items-center justify-center px-8 py-3 border border-transparent text-base font-medium rounded-full text-white bg-red-600 hover:bg-red-700 md:py-4 md:text-lg md:px-10 btn-primary">
-                    View Services <i data-lucide="arrow-right" class="w-5 h-5 ml-2"></i>
-                </a>
-            </div>
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container hero-grid">
+      <div class="hero-copy">
+        <h1>Fast Phone Repair in <span class="accent">Tulsa</span></h1>
+        <p class="lead">
+          Screens, batteries, charging ports, water damage, and more — for iPhone & Android.
+          Clear pricing, quality parts, and friendly service.
+        </p>
+
+        <div class="hero-cta">
+          <a class="btn" href="#contact">Get a Free Quote</a>
+          <a class="btn btn-ghost" href="tel:+19185550123">Call Now</a>
         </div>
-    </section>
 
-    <!-- Services -->
-    <section id="services" class="bg-white section-padding">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="text-center mb-12">
-                <span class="text-tulsa-red text-lg font-semibold uppercase">Expert Solutions</span>
-                <h3 class="mt-2 text-4xl font-bold text-gray-900">iPhone, Samsung & Pixel Repairs</h3>
-            </div>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-                <div class="bg-gray-50 p-6 rounded-xl shadow border-t-4 border-red-500">
-                    <i data-lucide="screen-share" class="w-10 h-10 text-tulsa-red mb-4"></i>
-                    <h4 class="text-2xl font-bold mb-2">Screen Replacement</h4>
-                    <p class="text-gray-600">Premium quality displays for all iPhone and Android models. Fixed fast while you wait.</p>
-                </div>
-                <div class="bg-gray-50 p-6 rounded-xl shadow border-t-4 border-red-500">
-                    <i data-lucide="battery-charging" class="w-10 h-10 text-tulsa-red mb-4"></i>
-                    <h4 class="text-2xl font-bold mb-2">Battery Refresh</h4>
-                    <p class="text-gray-600">Get your battery life back to 100%. We use certified replacement parts for safety and longevity.</p>
-                </div>
-                <div class="bg-gray-50 p-6 rounded-xl shadow border-t-4 border-red-500">
-                    <i data-lucide="droplets" class="w-10 h-10 text-tulsa-red mb-4"></i>
-                    <h4 class="text-2xl font-bold mb-2">Water Damage</h4>
-                    <p class="text-gray-600">Advanced diagnostic tools to recover devices from liquid damage. High success rates!</p>
-                </div>
-            </div>
+        <div class="hero-points" role="list">
+          <div class="point" role="listitem">✅ Same-day service on most repairs</div>
+          <div class="point" role="listitem">✅ Quality parts + warranty included</div>
+          <div class="point" role="listitem">✅ Honest diagnostics & fair pricing</div>
         </div>
-    </section>
+      </div>
 
-    <!-- Pricing -->
-    <section id="pricing" class="bg-gray-100 section-padding">
-        <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-            <h3 class="text-4xl font-bold text-gray-900 mb-4">Flat-Rate iPhone Pricing</h3>
-            <p class="text-xl text-gray-600 mb-8">Most standard iPhone repairs fall within this affordable range.</p>
+      <div class="hero-card">
+        <div class="card">
+          <h3>Quick Estimate</h3>
+          <p class="muted">Select your device + issue to get a starting estimate.</p>
 
-            <div class="bg-white p-8 rounded-2xl shadow-2xl border-b-8 border-red-500">
-                <div class="flex flex-col sm:flex-row items-center justify-center space-y-4 sm:space-y-0 sm:space-x-8">
-                    <div class="text-center">
-                        <p class="text-5xl font-extrabold text-tulsa-red">$60 - $100</p>
-                        <p class="text-gray-500 mt-2 font-medium italic">Covers Screen & Battery for all iPhone models</p>
-                    </div>
-                </div>
-            </div>
+          <form id="estimateForm" class="form">
+            <label>
+              Device
+              <select id="device">
+                <option value="iPhone">iPhone</option>
+                <option value="Samsung">Samsung</option>
+                <option value="Google Pixel">Google Pixel</option>
+                <option value="Other Android">Other Android</option>
+              </select>
+            </label>
 
-            <!-- AI Quote Estimator -->
-            <div id="quote-estimator" class="mt-12 bg-white p-6 rounded-xl shadow-lg border border-gray-200">
-                <h4 class="text-2xl font-bold text-gray-900 mb-6 flex items-center justify-center">
-                    <i data-lucide="sparkles" class="w-6 h-6 text-yellow-500 mr-2"></i> AI Quick Quote
-                </h4>
-                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    <input type="text" id="phone-model-input" placeholder="Device (e.g. iPhone 13)" class="p-3 border rounded-lg focus:ring-red-500">
-                    <input type="text" id="damage-type-input" placeholder="Issue (e.g. Screen)" class="p-3 border rounded-lg focus:ring-red-500">
-                    <button id="quote-button" class="bg-red-600 text-white px-5 py-3 rounded-lg font-semibold hover:bg-red-700">✨ Get Quote</button>
-                </div>
-                <div id="quote-result" class="mt-6 p-4 bg-gray-50 rounded-lg border flex items-center justify-center min-h-[100px]">
-                    <p class="text-gray-500">Instant estimates for any model or damage.</p>
-                </div>
-            </div>
+            <label>
+              Issue
+              <select id="issue">
+                <option value="Screen Replacement">Screen Replacement</option>
+                <option value="Battery Replacement">Battery Replacement</option>
+                <option value="Charging Port Repair">Charging Port Repair</option>
+                <option value="Water Damage Diagnostic">Water Damage Diagnostic</option>
+                <option value="Camera / Mic / Speaker">Camera / Mic / Speaker</option>
+              </select>
+            </label>
+
+            <button type="submit" class="btn btn-block">Show Estimate</button>
+
+            <div class="estimate-result" id="estimateResult" aria-live="polite"></div>
+            <p class="tiny muted">Final pricing may vary by model. We confirm before repair.</p>
+          </form>
         </div>
-    </section>
+      </div>
+    </div>
+  </section>
 
-    <!-- Contact & Chat -->
-    <section id="contact" class="bg-white section-padding">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 grid grid-cols-1 lg:grid-cols-2 gap-12">
-            <div class="space-y-8">
-                <h3 class="text-4xl font-bold text-gray-900">Visit Us in Tulsa</h3>
-                <div class="space-y-6">
-                    <div class="flex items-start space-x-4">
-                        <i data-lucide="map-pin" class="w-6 h-6 text-tulsa-red mt-1"></i>
-                        <div>
-                            <p class="font-bold text-xl">Area Location</p>
-                            <p class="text-gray-700">Tulsa, OK 74103</p>
-                        </div>
-                    </div>
-                    <div class="flex items-start space-x-4">
-                        <i data-lucide="phone-call" class="w-6 h-6 text-tulsa-red mt-1"></i>
-                        <div>
-                            <p class="font-bold text-xl">Phone Number</p>
-                            <p class="text-gray-700 text-2xl font-semibold">(918) 376-0093</p>
-                        </div>
-                    </div>
-                    <div class="flex items-start space-x-4">
-                        <i data-lucide="clock" class="w-6 h-6 text-tulsa-red mt-1"></i>
-                        <div>
-                            <p class="font-bold text-xl">Hours of Operation</p>
-                            <p class="text-gray-700">Mon - Sun: 7:00 AM - 9:00 PM</p>
-                        </div>
-                    </div>
-                </div>
-                <p id="user-id-display" class="text-xs text-gray-400"></p>
-            </div>
-
-            <!-- Chat Container -->
-            <div class="bg-gray-100 p-6 rounded-xl shadow-2xl flex flex-col h-[500px]" id="chat-container">
-                <h4 class="text-xl font-bold mb-4 flex items-center">
-                    <i data-lucide="message-circle" class="w-6 h-6 text-tulsa-red mr-2"></i> Support Chat
-                </h4>
-                <div id="chat-messages" class="flex-grow overflow-y-auto space-y-4 p-4 mb-4 bg-white rounded-lg border">
-                    <div class="flex flex-col items-start">
-                        <div class="px-3 py-1 text-blue-600 font-semibold text-xs uppercase">PRT Bot</div>
-                        <div class="bg-blue-100 text-gray-800 rounded-b-xl rounded-tr-xl p-3 shadow-sm text-sm">
-                            Welcome to Phone Repairs Tulsa! Need a price or a quick fix? Ask me anything.
-                        </div>
-                    </div>
-                </div>
-                <form id="chat-form" class="flex space-x-2">
-                    <input type="text" id="chat-input" placeholder="Type your question..." class="flex-grow p-3 border rounded-lg focus:ring-red-500" required>
-                    <button type="submit" id="send-button" class="bg-red-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-red-700">Send</button>
-                </form>
-            </div>
+  <!-- Trust row -->
+  <section class="trust">
+    <div class="container trust-grid">
+      <div class="trust-item">
+        <div class="icon">⚡</div>
+        <div>
+          <strong>Fast Turnaround</strong>
+          <div class="muted">Many repairs in 30–90 minutes</div>
         </div>
-    </section>
-
-    <footer class="bg-tulsa-gray text-white py-12">
-        <div class="max-w-7xl mx-auto px-4 text-center">
-            <div class="mb-6 flex justify-center items-center space-x-2">
-                <i data-lucide="wrench" class="w-6 h-6 text-red-500"></i>
-                <span class="text-2xl font-bold uppercase tracking-widest">Phone Repairs Tulsa</span>
-            </div>
-            <p class="text-gray-400">&copy; 2024 Phone Repairs Tulsa. All Rights Reserved.</p>
-            <p class="text-gray-500 mt-2">Serving the Tulsa, OK metro area with pride.</p>
+      </div>
+      <div class="trust-item">
+        <div class="icon">🛡️</div>
+        <div>
+          <strong>Warranty Included</strong>
+          <div class="muted">Parts & labor warranty</div>
         </div>
-    </footer>
+      </div>
+      <div class="trust-item">
+        <div class="icon">💬</div>
+        <div>
+          <strong>Transparent Updates</strong>
+          <div class="muted">No surprises — we confirm first</div>
+        </div>
+      </div>
+      <div class="trust-item">
+        <div class="icon">📍</div>
+        <div>
+          <strong>Local Tulsa Shop</strong>
+          <div class="muted">Walk-ins welcome</div>
+        </div>
+      </div>
+    </div>
+  </section>
 
-    <script> lucide.createIcons(); </script>
+  <!-- Services -->
+  <section class="section" id="services">
+    <div class="container">
+      <div class="section-head">
+        <h2>Repair Services</h2>
+        <p class="muted">We repair iPhone, Samsung, Pixel, and most Android models.</p>
+      </div>
+
+      <div class="grid cards">
+        <article class="service card">
+          <h3>Screen Replacement</h3>
+          <p>Cracked glass or display issues. We replace screens with quality parts.</p>
+          <ul>
+            <li>Touch issues / dead spots</li>
+            <li>Lines, black screen, flicker</li>
+            <li>Front glass replacement</li>
+          </ul>
+        </article>
+
+        <article class="service card">
+          <h3>Battery Replacement</h3>
+          <p>Fast-draining, overheating, or random shutdowns? We’ll swap your battery.</p>
+          <ul>
+            <li>Battery health issues</li>
+            <li>Swollen battery checks</li>
+            <li>Charging performance test</li>
+          </ul>
+        </article>
+
+        <article class="service card">
+          <h3>Charging Port Repair</h3>
+          <p>Loose cable, no charge, or slow charging. We clean/repair/replace ports.</p>
+          <ul>
+            <li>USB-C / Lightning ports</li>
+            <li>Water/ corrosion inspection</li>
+            <li>Fast-charge verification</li>
+          </ul>
+        </article>
+
+        <article class="service card">
+          <h3>Camera / Speaker / Mic</h3>
+          <p>Blurry camera, no audio, or call issues? We fix internal components.</p>
+          <ul>
+            <li>Front/back camera</li>
+            <li>Ear speaker & loudspeaker</li>
+            <li>Microphone & call quality</li>
+          </ul>
+        </article>
+
+        <article class="service card">
+          <h3>Water Damage Diagnostic</h3>
+          <p>We perform safe diagnostics and explain your options clearly.</p>
+          <ul>
+            <li>Moisture indicator check</li>
+            <li>Ultrasonic cleaning (if needed)</li>
+            <li>Data recovery guidance</li>
+          </ul>
+        </article>
+
+        <article class="service card">
+          <h3>Other Repairs</h3>
+          <p>Buttons, back glass, sensors, software troubleshooting and more.</p>
+          <ul>
+            <li>Power/volume buttons</li>
+            <li>Back glass repair</li>
+            <li>Software tune-up</li>
+          </ul>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Pricing -->
+  <section class="section alt" id="pricing">
+    <div class="container">
+      <div class="section-head">
+        <h2>Simple Pricing (Starting At)</h2>
+        <p class="muted">Model matters — we confirm exact price before any repair.</p>
+      </div>
+
+      <div class="pricing-grid">
+        <div class="card price-card">
+          <h3>Screen</h3>
+          <p class="price">$79+</p>
+          <ul>
+            <li>Most iPhone & Android</li>
+            <li>Same-day available</li>
+            <li>Warranty included</li>
+          </ul>
+          <a class="btn btn-ghost btn-block" href="#contact">Check My Model</a>
+        </div>
+
+        <div class="card price-card featured">
+          <div class="pill">Most Popular</div>
+          <h3>Battery</h3>
+          <p class="price">$49+</p>
+          <ul>
+            <li>Health test included</li>
+            <li>Quick turnaround</li>
+            <li>Warranty included</li>
+          </ul>
+          <a class="btn btn-block" href="#contact">Book Battery Swap</a>
+        </div>
+
+        <div class="card price-card">
+          <h3>Charging Port</h3>
+          <p class="price">$59+</p>
+          <ul>
+            <li>Port cleaning/repair</li>
+            <li>Fast-charge test</li>
+            <li>Warranty included</li>
+          </ul>
+          <a class="btn btn-ghost btn-block" href="#contact">Get Quote</a>
+        </div>
+      </div>
+
+      <div class="note card">
+        <strong>Free basic diagnostics</strong>
+        <p class="muted">We’ll inspect the device and explain options before you decide.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Reviews -->
+  <section class="section" id="reviews">
+    <div class="container">
+      <div class="section-head">
+        <h2>Customers Love Us</h2>
+        <p class="muted">Real service, fair prices, and fast turnaround.</p>
+      </div>
+
+      <div class="grid reviews">
+        <figure class="card review">
+          <blockquote>
+            “Fast and best price in Tulsa. Screen replaced in under an hour and it looks brand new.”
+          </blockquote>
+          <figcaption>— Sarah M.</figcaption>
+        </figure>
+        <figure class="card review">
+          <blockquote>
+            “They explained everything clearly and didn’t push extra repairs. Great customer service!”
+          </blockquote>
+          <figcaption>— James T.</figcaption>
+        </figure>
+        <figure class="card review">
+          <blockquote>
+            “Battery swap was quick. Phone feels like new again. Highly recommend.”
+          </blockquote>
+          <figcaption>— Priya K.</figcaption>
+        </figure>
+      </div>
+
+      <div class="center">
+        <a class="btn btn-ghost" href="#contact">Leave a Review / Get Help</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="section alt" id="faq">
+    <div class="container">
+      <div class="section-head">
+        <h2>FAQ</h2>
+        <p class="muted">Quick answers to common repair questions.</p>
+      </div>
+
+      <div class="faq">
+        <details class="card">
+          <summary>How long does a typical repair take?</summary>
+          <p>Most screen and battery repairs can be done the same day, often in 30–90 minutes depending on model and part availability.</p>
+        </details>
+
+        <details class="card">
+          <summary>Do you offer a warranty?</summary>
+          <p>Yes — we include a parts & labor warranty for most repairs. We’ll explain the warranty details when you book.</p>
+        </details>
+
+        <details class="card">
+          <summary>Do I need an appointment?</summary>
+          <p>Walk-ins are welcome, but booking helps us reserve time and parts for your model.</p>
+        </details>
+
+        <details class="card">
+          <summary>Will I lose my data?</summary>
+          <p>Most repairs do not affect your data, but we always recommend backing up when possible. If your phone won’t power on, ask about recovery options.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- Contact / Booking -->
+  <section class="section" id="contact">
+    <div class="container">
+      <div class="section-head">
+        <h2>Book a Repair</h2>
+        <p class="muted">Send details and we’ll confirm price + turnaround quickly.</p>
+      </div>
+
+      <div class="contact-grid">
+        <div class="card">
+          <h3>Request a Quote</h3>
+          <form class="form" id="contactForm">
+            <div class="two">
+              <label>
+                Name
+                <input type="text" id="name" placeholder="Your name" required/>
+              </label>
+              <label>
+                Phone
+                <input type="tel" id="phone" placeholder="(918) 555-0123" required/>
+              </label>
+            </div>
+
+            <label>
+              Email (optional)
+              <input type="email" id="email" placeholder="you@example.com"/>
+            </label>
+
+            <div class="two">
+              <label>
+                Device
+                <input type="text" id="deviceField" placeholder="iPhone 13 / Galaxy S22 / Pixel 7" required/>
+              </label>
+              <label>
+                Issue
+                <input type="text" id="issueField" placeholder="Cracked screen / battery / charging port" required/>
+              </label>
+            </div>
+
+            <label>
+              Message
+              <textarea id="message" rows="4" placeholder="Anything we should know? (e.g., not charging, dropped in water, face ID not working)"></textarea>
+            </label>
+
+            <button class="btn btn-block" type="submit">Send Request</button>
+            <p class="tiny muted">
+              This form opens your email app to send details (no server needed).
+            </p>
+          </form>
+        </div>
+
+        <div class="card" id="hours">
+          <h3>Store Info</h3>
+          <ul class="info">
+            <li><strong>Phone:</strong> <a href="tel:+19185550123">(918) 555-0123</a></li>
+            <li><strong>Email:</strong> <a href="mailto:repairs@phonerepairstulsa.com">repairs@phonerepairstulsa.com</a></li>
+            <li><strong>Address:</strong> 1234 E 11th St, Tulsa, OK 74120</li>
+            <li><strong>Hours:</strong> Mon–Sat 10am–7pm, Sun 12pm–5pm</li>
+          </ul>
+
+          <div class="map">
+            <!-- Replace with your actual Google Maps embed -->
+            <iframe
+              title="Map to Phone Repairs Tulsa"
+              src="https://www.google.com/maps?q=Tulsa%20OK&output=embed"
+              loading="lazy"
+              referrerpolicy="no-referrer-when-downgrade">
+            </iframe>
+          </div>
+
+          <div class="cta-row">
+            <a class="btn btn-ghost btn-block" href="tel:+19185550123">Call Now</a>
+            <a class="btn btn-block" href="#top">Back to Top</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div>
+        <strong>Phone Repairs Tulsa</strong>
+        <div class="muted">Fast • Affordable • Trusted</div>
+      </div>
+      <div class="muted small">
+        © <span id="year"></span> Phone Repairs Tulsa. All rights reserved.
+      </div>
+    </div>
+  </footer>
+
+  <script type="application/ld+json">
+  {
+    "@context":"https://schema.org",
+    "@type":"LocalBusiness",
+    "name":"Phone Repairs Tulsa",
+    "image":"",
+    "telephone":"+1-918-555-0123",
+    "address":{
+      "@type":"PostalAddress",
+      "streetAddress":"1234 E 11th St",
+      "addressLocality":"Tulsa",
+      "addressRegion":"OK",
+      "postalCode":"74120",
+      "addressCountry":"US"
+    },
+    "areaServed":"Tulsa, OK",
+    "url":"https://phonerepairstulsa.com",
+    "priceRange":"$",
+    "openingHours":["Mo-Sa 10:00-19:00","Su 12:00-17:00"]
+  }
+  </script>
+
+  <script src="script.js"></script>
 </body>
 </html>
