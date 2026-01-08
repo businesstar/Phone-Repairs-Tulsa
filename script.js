@@ -80,7 +80,7 @@ Preferred time to visit:
     );
 
     // Change this email to yours:
-    const to = "repairs@phonerepairstulsa.com";
+    const to = "phonerepairstulsa@gmail.com";
     window.location.href = `mailto:${to}?subject=${subject}&body=${body}`;
   });
 }
